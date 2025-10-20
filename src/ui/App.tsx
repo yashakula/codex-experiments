@@ -1,8 +1,14 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { ValidationResult } from "../gameplay/puzzle";
+import { LayoutMetrics, Requirement, ValidationResult } from "../gameplay/puzzle";
+import { computeLayoutMetrics } from "../gameplay/validator";
 import { BuilderProvider, useBuilderState, useLayoutControls } from "./BuilderState";
 import ScenarioSelect from "./ScenarioSelect";
 import ResultsModal from "./ResultsModal";
+import {
+  formatMetricLabel,
+  formatMetricValue,
+  getRequirementMetricValue,
+} from "./metricFormatting";
 
 function isValidationSuccessful(validation: ValidationResult | null): boolean {
   if (!validation) {
@@ -16,12 +22,110 @@ function isValidationSuccessful(validation: ValidationResult | null): boolean {
   );
 }
 
+interface RequirementStatus {
+  requirement: Requirement;
+  met: boolean;
+  observed: number;
+}
+
+interface VictoryStatus {
+  id: string;
+  description: string;
+  met: boolean;
+  requirements: RequirementStatus[];
+}
+
+function evaluateRequirement(requirement: Requirement, metrics: LayoutMetrics): boolean {
+  const observed = getRequirementMetricValue(requirement, metrics);
+  switch (requirement.comparator) {
+    case ">=":
+      return observed >= requirement.value;
+    case "<=":
+      return observed <= requirement.value;
+    case "=":
+      return observed === requirement.value;
+    default:
+      return false;
+  }
+}
+
+function describeRequirementDelta(status: RequirementStatus): string | null {
+  const { requirement, observed, met } = status;
+  const target = requirement.value;
+  const difference = observed - target;
+  if (requirement.comparator === ">=") {
+    if (met) {
+      return difference > 0
+        ? `${formatMetricValue(requirement.metric, difference)} above target`
+        : null;
+    }
+    return `Need ${formatMetricValue(requirement.metric, target - observed)} more`;
+  }
+  if (requirement.comparator === "<=") {
+    if (met) {
+      return target - observed > 0
+        ? `${formatMetricValue(requirement.metric, target - observed)} below limit`
+        : null;
+    }
+    return `Reduce by ${formatMetricValue(requirement.metric, observed - target)}`;
+  }
+  if (requirement.comparator === "=") {
+    if (met) {
+      return null;
+    }
+    const formatted = formatMetricValue(requirement.metric, Math.abs(difference));
+    return `${difference > 0 ? "+" : "-"}${formatted} from target`;
+  }
+  return null;
+}
+
 function LayoutBuilder() {
   const { scenario, validation, completions } = useBuilderState();
   const { layout, updateLayout, validate } = useLayoutControls();
   const [showResults, setShowResults] = useState(false);
 
   const success = useMemo(() => isValidationSuccessful(validation), [validation]);
+
+  const metrics = useMemo(
+    () => (scenario ? computeLayoutMetrics(layout, scenario) : null),
+    [layout, scenario]
+  );
+
+  const requirementProgress = useMemo(() => {
+    if (!scenario || !metrics) {
+      return null;
+    }
+    const statuses = new Map<string, RequirementStatus>();
+    const getStatus = (requirement: Requirement) => {
+      const existing = statuses.get(requirement.id);
+      if (existing) {
+        return existing;
+      }
+      const observed = getRequirementMetricValue(requirement, metrics);
+      const status: RequirementStatus = {
+        requirement,
+        observed,
+        met: evaluateRequirement(requirement, metrics),
+      };
+      statuses.set(requirement.id, status);
+      return status;
+    };
+
+    const global = (scenario.globalRequirements ?? []).map((requirement) =>
+      getStatus(requirement)
+    );
+    const victories: VictoryStatus[] = scenario.victoryConditions.map((victory) => {
+      const requirements = victory.requirements.map((requirement) => getStatus(requirement));
+      return {
+        id: victory.id,
+        description: victory.description,
+        requirements,
+        met: requirements.every((status) => status.met),
+      };
+    });
+
+    return { global, victories };
+  }, [scenario, metrics]);
 
   useEffect(() => {
     if (success) {
@@ -44,6 +148,12 @@ function LayoutBuilder() {
       sanitized > 0 ? [...remaining, { componentId, quantity: sanitized }] : remaining;
     updateLayout({ components: nextComponents });
   };
+
+  const sortedCompletions = useMemo(
+    () =>
+      [...completions].sort((left, right) => right.completedAt - left.completedAt),
+    [completions]
+  );
 
   return (
     <div className="builder-workspace">
@@ -97,6 +207,90 @@ function LayoutBuilder() {
         </button>
       </section>
 
+      {metrics && (
+        <section className="builder-workspace__metrics">
+          <h3>Current Metrics</h3>
+          <table>
+            <tbody>
+              <tr>
+                <th scope="row">{formatMetricLabel("tps")}</th>
+                <td>{formatMetricValue("tps", metrics.totalThroughput)}</td>
+              </tr>
+              <tr>
+                <th scope="row">{formatMetricLabel("latency")}</th>
+                <td>{formatMetricValue("latency", metrics.averageLatency)}</td>
+              </tr>
+              {Object.entries(metrics.modifiers)
+                .filter(([, value]) => typeof value === "number" && !Number.isNaN(value))
+                .map(([metric, value]) => (
+                  <tr key={metric}>
+                    <th scope="row">{formatMetricLabel(metric)}</th>
+                    <td>{formatMetricValue(metric as Requirement["metric"], value ?? 0)}</td>
+                  </tr>
+                ))}
+            </tbody>
+          </table>
+        </section>
+      )}
+
+      {requirementProgress && (
+        <section className="builder-workspace__progress">
+          <h3>Victory Progress</h3>
+          {requirementProgress.global.length > 0 && (
+            <div className="builder-workspace__progress-group">
+              <h4>Global Requirements</h4>
+              <ul>
+                {requirementProgress.global.map((status) => {
+                  const delta = describeRequirementDelta(status);
+                  return (
+                    <li key={status.requirement.id}>
+                      <div>
+                        <strong>{status.met ? "✅" : "⚠️"}</strong> {status.requirement.description}
+                      </div>
+                      <div>
+                        Target: {formatMetricValue(status.requirement.metric, status.requirement.value)} · Current:{" "}
+                        {formatMetricValue(status.requirement.metric, status.observed)}
+                      </div>
+                      {delta && <div>{delta}</div>}
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          )}
+
+          <div className="builder-workspace__progress-group">
+            <h4>Victory Conditions</h4>
+            <ul>
+              {requirementProgress.victories.map((victory) => (
+                <li key={victory.id}>
+                  <div>
+                    <strong>{victory.met ? "🏆" : "⏳"}</strong> {victory.description}
+                  </div>
+                  <ul>
+                    {victory.requirements.map((status) => {
+                      const delta = describeRequirementDelta(status);
+                      return (
+                        <li key={`${victory.id}-${status.requirement.id}`}>
+                          <div>
+                            <strong>{status.met ? "✅" : "⚠️"}</strong> {status.requirement.description}
+                          </div>
+                          <div>
+                            Target: {formatMetricValue(status.requirement.metric, status.requirement.value)} · Current:{" "}
+                            {formatMetricValue(status.requirement.metric, status.observed)}
+                          </div>
+                          {delta && <div>{delta}</div>}
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </section>
+      )}
+
       {validation && !success && (
         <section className="builder-workspace__feedback">
           <h3>Validation Feedback</h3>
@@ -135,11 +329,11 @@ function LayoutBuilder() {
 
       <section className="builder-workspace__history">
         <h3>Completion History</h3>
-        {completions.length === 0 ? (
+        {sortedCompletions.length === 0 ? (
           <p>No recorded completions yet.</p>
         ) : (
           <ul>
-            {completions.map((completion) => (
+            {sortedCompletions.map((completion) => (
               <li key={completion.completedAt}>
                 {new Date(completion.completedAt).toLocaleString()} – Cleared with {" "}
                 {completion.victoryConditionsMet.length} goal

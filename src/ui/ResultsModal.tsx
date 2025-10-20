@@ -4,6 +4,10 @@ import {
   Requirement,
   ValidationResult,
 } from "../gameplay/puzzle";
+import {
+  formatMetricValue,
+  getRequirementMetricValue,
+} from "./metricFormatting";
 
 type ResultsModalProps = {
   scenario: PuzzleScenario;
@@ -16,32 +20,6 @@ interface RequirementSummary {
   achieved: number;
 }
 
-function getMetricValue(requirement: Requirement, validation: ValidationResult): number {
-  switch (requirement.metric) {
-    case "tps":
-      return validation.metrics.totalThroughput;
-    case "latency":
-      return validation.metrics.averageLatency;
-    default:
-      return validation.metrics.modifiers[requirement.metric] ?? 0;
-  }
-}
-
-function formatMetricValue(metric: Requirement["metric"], value: number): string {
-  switch (metric) {
-    case "latency":
-      return `${value.toFixed(0)} ms`;
-    case "tps":
-      return `${value.toFixed(0)} TPS`;
-    case "bandwidth":
-      return `${value.toFixed(0)} Mbps`;
-    case "errorRate":
-      return `${(value * 100).toFixed(2)}%`;
-    default:
-      return value.toFixed(2);
-  }
-}
-
 function summarizeRequirements(
   scenario: PuzzleScenario,
   validation: ValidationResult
@@ -50,7 +28,7 @@ function summarizeRequirements(
   const addRequirement = (requirement: Requirement) => {
     summaries.push({
       requirement,
-      achieved: getMetricValue(requirement, validation),
+      achieved: getRequirementMetricValue(requirement, validation.metrics),
     });
   };
   (scenario.globalRequirements ?? []).forEach(addRequirement);
